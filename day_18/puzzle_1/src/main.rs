@@ -29,28 +29,6 @@ fn compute(input: &[&str]) -> Result<u32> {
     Ok(sum.magnitude())
 }
 
-// each number is a tree
-// leafs are u32, branches are pairs
-
-// [[1,2],3]
-// ==
-//      root pair
-//      /  \
-//    pair  3
-//    /  \
-//   1    2
-
-// trees are traditionally hard in rust
-// due to memory safety and the borrow checker
-//
-// what if we store nodes as indexes into an array?
-// this would seem to make removing nodes harder, we'd have to effectively just leave them as
-// garbage or do a bulk update of the tree after a removal (updating all the nodes indices)
-// we definitely need to remove nodes (explosion)
-
-// each node can have a value or a pair of nodes (lhs, rhs)
-// that would normally look like an enum (value(u32), pair(Rc<RefCell<node>>, node))
-
 #[derive(Debug)]
 enum Side {
     Lhs,
@@ -85,7 +63,8 @@ impl Node {
         match self.value {
             Some(n) => n,
             None => {
-                self.lhs.as_ref().unwrap().magnitude() * 3 + self.rhs.as_ref().unwrap().magnitude()
+                self.lhs.as_ref().unwrap().magnitude() * 3
+                    + self.rhs.as_ref().unwrap().magnitude() * 2
             }
         }
     }
@@ -110,7 +89,10 @@ impl Node {
         loop {
             let explosion = self.try_explode(1);
 
-            let split = self.try_split();
+            let mut split = false;
+            if explosion.is_none() {
+                split = self.try_split();
+            }
 
             if explosion.is_none() && !split {
                 break;
@@ -123,62 +105,60 @@ impl Node {
         //      set our value to 0, return our previous values for adding to our neighbour nodes
         match self.value {
             None => {
-                if depth > 4 {
-                    // explode!
-                    let lhs = self.lhs.take();
-                    let rhs = self.rhs.take();
-                    self.value = Some(0);
-                    if lhs.as_ref().unwrap().lhs.is_some() {
-                        println!("{:?} {:?}", lhs, rhs);
+                let mut left_over_explosion_values = None;
+                // if the lhs of this pair exploded, add the rhs explosion value to our rhs's
+                // lhs value
+                let lhs_action = self.lhs.as_mut().unwrap().try_explode(depth + 1);
+                match lhs_action {
+                    Some((Some(lhs), Some(rhs))) => {
+                        // fresh explosion
+                        self.rhs.as_mut().unwrap().increase(Side::Lhs, rhs);
+                        left_over_explosion_values = Some((Some(lhs), None));
                     }
-                    Some((lhs.unwrap().value, rhs.unwrap().value))
-                } else {
-                    let mut left_over_explosion_values = (None, None);
-                    // if the lhs of this pair exploded, add the rhs explosion value to our rhs's
-                    // lhs value
-                    let lhs_action = self.lhs.as_mut().unwrap().try_explode(depth + 1);
-                    match lhs_action {
-                        Some((Some(lhs), Some(rhs))) => {
-                            // fresh explosion
-                            self.rhs.as_mut().unwrap().increase(Side::Lhs, rhs);
-                            left_over_explosion_values.0 = Some(lhs);
-                        }
-                        Some((Some(lhs), None)) => {
-                            left_over_explosion_values.0 = Some(lhs);
-                        }
-                        Some((None, Some(rhs))) => {
-                            self.rhs.as_mut().unwrap().increase(Side::Lhs, rhs);
-                        }
-                        None => {
-                            // maybe we should explode here?
-                            // because we've gone down the tree and are now working our way back
-                            // up?
-                            let rhs_action = self.rhs.as_mut().unwrap().try_explode(depth + 1);
-                            match rhs_action {
-                                Some((Some(lhs), Some(rhs))) => {
-                                    // fresh explosion
-                                    self.lhs.as_mut().unwrap().increase(Side::Rhs, lhs);
-                                    left_over_explosion_values.1 = Some(rhs);
-                                }
-                                Some((Some(lhs), None)) => {
-                                    self.lhs.as_mut().unwrap().increase(Side::Rhs, lhs);
-                                }
-                                Some((None, Some(rhs))) => {
-                                    left_over_explosion_values.1 = Some(rhs);
-                                }
-                                None => (),
-                                _ => panic!(
-                                    "Got Some(None, None) for rhs action, shouldn't be possible"
-                                ),
-                            };
-                        }
-                        _ => panic!("Got Some(None, None) for lhs action, shouldn't be possible"),
+                    Some((Some(lhs), None)) => {
+                        left_over_explosion_values = Some((Some(lhs), None));
                     }
-                    match left_over_explosion_values {
-                        (None, None) => None,
-                        _ => Some(left_over_explosion_values),
+                    Some((None, Some(rhs))) => {
+                        self.rhs.as_mut().unwrap().increase(Side::Lhs, rhs);
+                        left_over_explosion_values = Some((None, None));
+                    }
+                    Some((None, None)) => {
+                        // this means we had an explosion, but we've dealth with the side effects
+                        left_over_explosion_values = Some((None, None));
+                    }
+                    None => {
+                        // A None action means we hit a value (leaf) node on the LHS
+                        // we should try the rhs to make sure we're on a pair with plain values
+                        let rhs_action = self.rhs.as_mut().unwrap().try_explode(depth + 1);
+                        match rhs_action {
+                            Some((Some(lhs), Some(rhs))) => {
+                                // fresh explosion
+                                self.lhs.as_mut().unwrap().increase(Side::Rhs, lhs);
+                                left_over_explosion_values = Some((None, Some(rhs)));
+                            }
+                            Some((Some(lhs), None)) => {
+                                self.lhs.as_mut().unwrap().increase(Side::Rhs, lhs);
+                                left_over_explosion_values = Some((None, None));
+                            }
+                            Some((None, Some(rhs))) => {
+                                left_over_explosion_values = Some((None, Some(rhs)));
+                            }
+                            Some((None, None)) => {
+                                left_over_explosion_values = Some((None, None));
+                            }
+                            None => {
+                                if depth > 4 {
+                                    // explode!
+                                    let lhs = self.lhs.take();
+                                    let rhs = self.rhs.take();
+                                    self.value = Some(0);
+                                    return Some((lhs.unwrap().value, rhs.unwrap().value));
+                                }
+                            }
+                        };
                     }
                 }
+                left_over_explosion_values
             }
             Some(_) => None,
         }
@@ -338,6 +318,26 @@ mod tests {
         assert_eq!(compute(&test_data)?, 4140);
         Ok(())
     }
+
+    #[test]
+    fn example2() -> Result<()> {
+        let test_data = vec![
+            "[[[0,[4,5]],[0,0]],[[[4,5],[2,6]],[9,5]]]",
+            "[7,[[[3,7],[4,3]],[[6,3],[8,8]]]]",
+            "[[2,[[0,8],[3,4]]],[[[6,7],1],[7,[1,6]]]]",
+            "[[[[2,4],7],[6,[0,5]]],[[[6,8],[2,8]],[[2,1],[4,5]]]]",
+            "[7,[5,[[3,8],[1,4]]]]",
+            "[[2,[2,2]],[8,[8,1]]]",
+            "[2,9]",
+            "[1,[[[9,3],9],[[9,0],[0,7]]]]",
+            "[[[5,[7,4]],7],1]",
+            "[[[[4,2],2],6],[8,7]]",
+        ];
+
+        assert_eq!(compute(&test_data)?, 3488);
+        Ok(())
+    }
+
     #[test]
     fn test_parse_basic() -> Result<()> {
         let test_data = "[1,2]";
@@ -408,6 +408,24 @@ mod tests {
     }
 
     #[test]
+    fn test_explode_4() -> Result<()> {
+        let mut node = Node::from_str("[[3,[2,[1,[7,3]]]],[6,[5,[4,[3,2]]]]]")?;
+
+        node.try_explode(1);
+        assert_eq!(format!("{}", node), "[[3,[2,[8,0]]],[9,[5,[4,[3,2]]]]]");
+        Ok(())
+    }
+
+    #[test]
+    fn test_explode_5() -> Result<()> {
+        let mut node = Node::from_str("[[3,[2,[8,0]]],[9,[5,[4,[3,2]]]]]")?;
+
+        node.try_explode(1);
+        assert_eq!(format!("{}", node), "[[3,[2,[8,0]]],[9,[5,[7,0]]]]");
+        Ok(())
+    }
+
+    #[test]
     fn test_addition_explode_split() -> Result<()> {
         let lhs = Node::from_str("[[[[4,3],4],4],[7,[[8,4],9]]]")?;
         let rhs = Node::from_str("[1,1]")?;
@@ -416,6 +434,14 @@ mod tests {
             format!("{}", lhs + rhs),
             "[[[[0,7],4],[[7,8],[6,0]]],[8,1]]"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_magnitude_1() -> Result<()> {
+        let node = Node::from_str("[[1,2],[[3,4],5]]")?;
+
+        assert_eq!(node.magnitude(), 143);
         Ok(())
     }
 }
